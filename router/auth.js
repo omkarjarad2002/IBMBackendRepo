@@ -9,16 +9,17 @@ const path = require("path");
 const passport = require("passport");
 const { v4: uuidv4 } = require("uuid");
 const { OAuth2Client } = require("google-auth-library");
-const nodemailer = require("nodemailer");
+const sgMail = require("@sendgrid/mail");
+const EMAIL_API_KEY = process.env.SENDGRID_API_KEY;
+const SECRET_KEY = process.env.SECRET_KEY;
+sgMail.setApiKey(EMAIL_API_KEY);
 
 require("../db/conn");
 const User = require("../schema/userSchema");
 const Blog = require("../schema/userBlog");
-const FollowersFollowing = require("../schema/followerFollowingSchema");
-const {
-  findById,
-  findByIdAndDelete,
-} = require("../schema/followerFollowingSchema");
+
+const { appendFile } = require("fs");
+const BookMarkedBlogs = require("../schema/bookMarkSchema");
 
 const authGoogleClient = new OAuth2Client(
   "75044728575-dgg9ak39mi03976k7qv9orq6gl5ng6ji.apps.googleusercontent.com"
@@ -41,41 +42,44 @@ const upload = multer({ storage });
 //sending email verification code
 router.post("/sendEmail", async (req, res) => {
   const { email } = req.body;
-  let data = await User.findOne({ email });
+  console.log(email);
+  // res.send(email);
+
+  let user = await User.findOne({ email });
 
   const responceType = {};
 
-  if (data) {
-    let otpcode = Math.floor(Math.random() * 10000 + 1);
+  if (user) {
+    const secret = SECRET_KEY + user._id;
+    console.log(secret);
     responceType.statusText = "Success";
     responceType.message = "Please check Your Email Id";
 
-    /////////////////////////////////////////////////////////////////
-
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: "jaradomkar1@gmail.com",
-        pass: "Jarad@2432#1234567890",
-      },
-    });
-
-    const mailOptions = {
-      from: "jaradomkar1@gmail.com",
-      to: req.body.email,
-      subject: "One time verification OTP from Blog's",
-      text: otpcode.toString(),
+    const payload = {
+      email: email,
+      id: user._id,
     };
 
-    transporter.sendMail(mailOptions, function (error, info) {
-      if (error) {
-        console.log("error", error.message);
-      } else {
-        console.log("Email sent: " + info.response);
-      }
-    });
-    let final__otp = otpcode.toString();
-    res.status(200).json({ email, final__otp });
+    const token = jwt.sign(payload, secret, { expiresIn: "15m" });
+    console.log(token);
+    const link = `http://localhost:3000/addPassword/${user._id}/${token}`;
+
+    /////////////////////////////////////////////////////////////////
+
+    const message = {
+      to: req.body.email,
+      from: "jaradomkar1@gmail.com",
+      subject: "Password reset link from blog's",
+      text: "Wish you a happy day with B's",
+      html: `<Link> ${link} </Link>`,
+    };
+
+    sgMail
+      .send(message)
+      .then((response) => console.log(response))
+      .catch((error) => console.log(error.message));
+
+    return res.status(200).json({ message: "success" });
 
     //////////////////////////////////////////////////////////////////
   } else {
@@ -84,37 +88,56 @@ router.post("/sendEmail", async (req, res) => {
   }
 });
 
+//verify otp route
+router.post("/verifyotp", async (req, res) => {
+  const { id, token } = req.params;
+
+  if (!id || !token) {
+    return;
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    const secret = SECRET_KEY + user.password;
+
+    const payload = jwt.verify(secret, token);
+  } catch (error) {
+    return res.status(400).json({ message: error });
+  }
+});
+
 //change password route
 
-router.post("/changePassword", async (req, res) => {
-  let { otp, otpcode, email, password, cpassword } = req.body;
-  let data = await User.findOne({ email: email });
+router.post("/changePassword/:id/:token", async (req, res) => {
+  const { id, token } = req.params;
+  let { password, cpassword } = req.body;
+  const user = await User.findOne({ id: id });
 
   const responce = {};
-  if (data && otp === otpcode) {
-    let currentTime = new Date().getTime();
-    let diff = data.expireIn - currentTime;
+  try {
+    if (user) {
+      const secret = SECRET_KEY + id;
+      console.log(secret);
+      const payload = jwt.verify(token, secret);
 
-    if (diff < 0) {
-      responce.message = "Token Expire";
-      responce.statusText = "error";
-      res.status(402).json(responce);
-    } else {
-      let user = await User.findOne({ email: email });
       user.password = password;
       user.cpassword = cpassword;
+      res.send(user);
 
       password = await bcrypt.hash(user.password, 12);
       cpassword = await bcrypt.hash(user.cpassword, 12);
-      user.save();
+      await user.save();
       responce.message = "Password changed Successfully";
       responce.statusText = "Success";
-      res.status(200).json(responce);
+      console.log(responce);
+      res.status(200).json({ user });
+    } else {
+      responce.message = "Invalid Reset Link";
+      responce.statusText = "error";
+      res.status(401).json(responce);
     }
-  } else {
-    responce.message = "Invalid Otp";
-    responce.statusText = "error";
-    res.status(401).json(responce);
+  } catch (error) {
+    return res.status(500).json({ message: error });
   }
 });
 
@@ -148,9 +171,7 @@ router.post("/register", async (req, res) => {
       //data mongodb la save karya aadhi password secure kela aahe userSchama madhe by using bcryptjs
 
       await user.save();
-      return res
-        .status(201)
-        .json({ message: "User registerd successfully !!" });
+      return res.status(201).json({ user });
     }
   } catch (error) {
     console.log(error);
@@ -204,9 +225,11 @@ router.post("/signin", async (req, res) => {
     }
 
     const userLogin = await User.findOne({ email: email });
+    // const userLogin = await User.findOne({ email: email }).select("+password");
 
     if (userLogin) {
-      const isMatch = await bcrypt.compare(password, userLogin.password);
+      console.log(userLogin);
+      const isMatch = bcrypt.compare(password, userLogin.password);
       const accessToken = await userLogin.generateAuthToken();
       const refreshToken = await userLogin.generateAuthRefreshToken();
 
@@ -301,10 +324,16 @@ router.get("/getallblogs", async (req, res) => {
   return res.status(201).json({ data });
 });
 
-//get all blogs of specific user id these is only for that specific user
+//get user all blogs
 
-router.get("/getuserblogs/:id", async (req, res) => {
+router.get("/getUserAllblogs/:id", async (req, res) => {
   const data = await Blog.find({ userID: req.params.id });
+  return res.status(201).json({ data });
+});
+
+//get blog
+router.get("/getblogDetail/:id", async (req, res) => {
+  const data = await Blog.findOne({ _id: req.params.id });
   return res.status(201).json({ data });
 });
 
@@ -325,90 +354,47 @@ router.delete("/deleteblog/:id", async (req, res) => {
   return res.json(data);
 });
 
-//add follower and following
-
-router.post("/addfollowerfollowing", async (req, res) => {
-  const { followerID, followingID } = req.body;
-
-  try {
-    const data = new FollowersFollowing({ followerID, followingID });
-    console.log(data);
-    await data.save();
-  } catch (error) {
-    console.log(error);
-    return res.status(402).json({ message: "ERROR" });
-  }
+//get all book marked blogs of specific user
+router.get("/getbookmarkedblogs/:id", async (req, res) => {
+  const data = await BookMarkedBlogs.find({
+    userId: req.params.id,
+  }).populate("blogId");
+  console.log(data);
+  return res.json({ data });
 });
 
-//get all followers to a specific user
+//remove blog from book marked page
 
-router.get("/getallfollowers", async () => {
-  const { followerID, followingID } = req.body;
-
-  try {
-    const data = await findById({ followerID, followingID });
-    return res.json(data);
-  } catch (error) {
-    console.log(error);
-  }
+router.delete("/removebookmarkedblog/:id", async (req, res) => {
+  const data = await BookMarkedBlogs.findByIdAndDelete({ _id: req.params.id });
+  return res.json(data);
 });
 
-//unfollow the author
-router.delete("/removefollowing", async () => {
-  const { followerID, followingID } = req.body;
+//book mark route
+
+router.post("/bookMark", async (req, res) => {
+  const { blogId, userId } = req.body;
+  if (!blogId || !userId) {
+    return res.status(422).json({ message: "Unexpected error occured !!" });
+  }
 
   try {
-    const data = await findByIdAndDelete({ followerID, followingID });
-    return res.json(data);
+    const userExist = await User.findById({ _id: userId });
+    if (userExist) {
+      const data = new BookMarkedBlogs({ blogId: blogId, userId: userId });
+      await data.save();
+      return res.status(201).json({ data });
+    }
+    return res.status(401).json({ data });
   } catch (error) {
     console.log(error);
   }
 });
 
-//googlelogin route
-
-const CLIENT_URL = "http://localhost:3000/addPassword";
-
-router.get("/login/failed", (req, res) => {
-  return res.status(401).json({ success: false, message: "failure" });
-});
-
-router.get("/login/success", async (req, res) => {
-  if (req.user) {
-    return res.status(200).json({
-      success: true,
-      message: "success",
-      user: req.user,
-    });
-  }
-});
-
-router.get(
-  "/google",
-  passport.authenticate("google", { scope: ["profile", "email"] })
-);
-
-router.get(
-  "/google/callback",
-  passport.authenticate("google", {
-    successRedirect: CLIENT_URL,
-    failureRedirect: "/login/failed",
-    scope: ["profile", "email"],
-  })
-);
-
-router.post("/addPassword/:id", async (req, res) => {
-  const { password, cpassword } = req.body;
-
-  if (!password || !cpassword) {
-    return res.status(401).json({ message: "Unauthorized" });
-  }
-
-  try {
-    const data = await User.findById({ _id: id });
-  } catch (error) {
-    return res.status(401).json({ message: "ERROR" });
-  }
+// get all book marked users
+router.get("/getAllBookMarkedUsers/:id", async (req, res) => {
+  const data = await BookMarkedBlogs.find({ userId: req.params.id });
+  return res.json({ data });
 });
 
 //get a specific blog

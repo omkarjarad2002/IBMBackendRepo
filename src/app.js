@@ -14,6 +14,8 @@ const expressSession = require("express-session");
 const cookieParser = require("cookie-parser");
 app.use(cookieParser());
 
+app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+
 const bodyParser = require("body-parser");
 app.use(bodyParser.json());
 
