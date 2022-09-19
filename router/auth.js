@@ -381,8 +381,18 @@ router.post("/bookMark", async (req, res) => {
   try {
     const userExist = await User.findById({ _id: userId });
     if (userExist) {
-      const data = new BookMarkedBlogs({ blogId: blogId, userId: userId });
-      await data.save();
+      const data = await BookMarkedBlogs.findOne({
+        blogId: blogId,
+        userId: userId,
+      });
+
+      if (data) {
+        return res.status(402).json({ message: "Blog already exists !!" });
+      }
+
+      const newBlog = new BookMarkedBlogs({ blogId: blogId, userId: userId });
+
+      await newBlog.save();
       return res.status(201).json({ data });
     }
     return res.status(401).json({ data });
